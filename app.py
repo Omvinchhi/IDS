@@ -217,7 +217,8 @@ if mode == 'Detection':
                             Xs = scaler.transform(row) if scaler is not None else row.values
                             pred = model.predict(Xs)[0]
                             st.metric('Prediction', str(pred))
-
+                except Exception as e:
+                    st.exception(e)
 elif mode == 'Train (Advanced)':
     st.header('Train model (advanced)')
     if st.button('Load & Preprocess (advanced)'):
@@ -255,7 +256,8 @@ elif mode == 'Train (Advanced)':
                 st.session_state['train_ready'] = True
                 st.session_state['train_X'] = Xs; st.session_state['train_y'] = y.values; st.session_state['test_X'] = testXs; st.session_state['selected'] = selected; st.session_state['scaler'] = scaler; st.session_state['encoders'] = encoders
                 st.success('Preprocessing done (advanced). Click Train model to continue.')
-
+        except Exception as e:
+            st.exception(e)
     if 'train_ready' in st.session_state and st.button('Train model (advanced)'):
         try:
             Xs = st.session_state['train_X']; ys = st.session_state['train_y']
@@ -275,3 +277,4 @@ elif mode == 'Train (Advanced)':
             st.success(f'Model trained and saved to {MODEL_PATH}')
         except Exception as e:
             st.exception(e)
+
