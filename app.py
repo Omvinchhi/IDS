@@ -203,6 +203,42 @@ def predict_df(model, scaler, encoders, df, selected):
 
     return preds, probs
 
+
+def _pred_to_human(pred, encoders, model):
+    """Map numeric prediction to a simple human-friendly status.
+
+    Returns (label, status) where label is the original class label if available
+    (e.g. 'normal'/'anomaly') and status is either 'Normal' or 'Attack'.
+    """
+    if pred is None:
+        return None, 'Unknown'
+    # pred may be scalar or array-like; ensure scalar
+    try:
+        p = int(pred)
+    except Exception:
+        # if model returns non-integer classes, try to map directly
+        p = pred
+
+    label = None
+    if 'class' in encoders:
+        try:
+            label = encoders['class'].classes_[p]
+        except Exception:
+            label = str(p)
+    else:
+        try:
+            # fall back to model.classes_
+            label = str(list(getattr(model, 'classes_', []))[int(p)])
+        except Exception:
+            label = str(p)
+
+    # normalize to Attack vs Normal
+    if isinstance(label, str) and label.lower() == 'normal':
+        status = 'Normal'
+    else:
+        status = 'Attack'
+    return label, status
+
 ##### end simulator helpers #####
 with st.sidebar:
     st.header('Mode')
@@ -275,10 +311,19 @@ if mode == 'Detection':
                     else:
                         Xs = X.values
                     preds = model.predict(Xs)
-                    df['prediction'] = preds
-                    st.success('Predictions complete')
-                    st.write(df.head(50))
-                    st.download_button('Download predictions (CSV)', data=df.to_csv(index=False).encode('utf-8'), file_name='predictions.csv')
+                    # Map numeric preds to human-friendly status and show only that
+                    human_labels = []
+                    statuses = []
+                    for p in preds:
+                        lab, stat = _pred_to_human(p, pretrained.get('encoders', {}), model)
+                        human_labels.append(lab)
+                        statuses.append(stat)
+                    out = df.copy()
+                    out['label'] = human_labels
+                    out['status'] = statuses
+                    st.success('Classification complete')
+                    st.write(out[['label','status']].head(50))
+                    st.download_button('Download classification (CSV)', data=out.to_csv(index=False).encode('utf-8'), file_name='classification.csv')
                 except Exception as e:
                     st.exception(e)
         else:
@@ -313,12 +358,91 @@ if mode == 'Detection':
                                         le = LabelEncoder(); row[c] = le.fit_transform(row[c].astype(str))
                             Xs = scaler.transform(row) if scaler is not None else row.values
                             pred = model.predict(Xs)[0]
-                            st.metric('Prediction', str(pred))
+                            lab, stat = _pred_to_human(pred, pretrained.get('encoders', {}), model)
+                            if stat == 'Attack':
+                                st.error('Intrusion detected')
+                            else:
+                                st.success('No intrusion detected')
                 except Exception as e:
                     st.exception(e)
             # Simulator: generate or craft model-compatible inputs and classify
             with st.expander('Simulator (generate model-compatible inputs)'):
                 st.write('Create synthetic or custom samples using the model\'s encoders and selected features.')
+                # Manual friendly-input simulator
+                with st.expander('Manual Simulation (friendly inputs)'):
+                    st.write('Enter connection-level values and map them to the model features.')
+                    duration = st.number_input('Duration (0-54451)', min_value=0, max_value=54451, value=0)
+                    # protocol options from encoder if present
+                    encoders = pretrained.get('encoders', {}) or {}
+                    if 'protocol_type' in encoders:
+                        proto_opts = list(encoders['protocol_type'].classes_)
+                        protocol_type = st.selectbox('Protocol Type', options=proto_opts)
+                    else:
+                        protocol_type = st.selectbox('Protocol Type', options=['tcp','udp','icmp'])
+
+                    if 'service' in encoders:
+                        svc_opts = list(encoders['service'].classes_)
+                        service = st.selectbox('Service', options=svc_opts)
+                    else:
+                        service = st.text_input('Service (e.g. http, ftp)', value='http')
+
+                    if 'flag' in encoders:
+                        flag_opts = list(encoders['flag'].classes_)
+                        flag = st.selectbox('Flag', options=flag_opts)
+                    else:
+                        flag = st.text_input('Flag (e.g. SF, S0)', value='SF')
+
+                    src_bytes = st.number_input('Src Bytes', min_value=0, value=0)
+                    dst_bytes = st.number_input('Dstn Bytes', min_value=0, value=0)
+                    logged_in = st.selectbox('Logged In', options=[0,1], index=0)
+                    wrong_fragment = st.number_input('Wrong Fragment', min_value=0, value=0)
+                    same_destn_count = st.number_input('Same Destn Count', min_value=0, value=0)
+                    same_port_count = st.number_input('Same Port Count', min_value=0, value=0)
+
+                    if st.button('Simulate connection'):
+                        try:
+                            selected = pretrained.get('selected', [])
+                            scaler = pretrained.get('scaler', None)
+                            encs = pretrained.get('encoders', {}) or {}
+
+                            # map friendly inputs to model-selected features
+                            mapped_inputs = {}
+                            for col in selected:
+                                if col == 'protocol_type':
+                                    mapped_inputs[col] = protocol_type
+                                elif col == 'flag':
+                                    mapped_inputs[col] = flag
+                                elif col == 'src_bytes':
+                                    mapped_inputs[col] = src_bytes
+                                elif col == 'dst_bytes':
+                                    mapped_inputs[col] = dst_bytes
+                                elif col == 'count':
+                                    mapped_inputs[col] = same_port_count
+                                elif col == 'same_srv_rate':
+                                    mapped_inputs[col] = float(logged_in)
+                                elif col == 'diff_srv_rate':
+                                    # small normalization for wrong_fragment
+                                    mapped_inputs[col] = min(1.0, float(wrong_fragment) / 10.0)
+                                elif col == 'dst_host_srv_count':
+                                    mapped_inputs[col] = same_destn_count
+                                elif col == 'dst_host_same_srv_rate':
+                                    mapped_inputs[col] = float(logged_in)
+                                elif col == 'dst_host_diff_srv_rate':
+                                    mapped_inputs[col] = min(1.0, float(wrong_fragment) / 10.0)
+                                else:
+                                    # unknown selected column -> leave None so builder fills default
+                                    mapped_inputs[col] = None
+
+                            row = build_row_from_inputs(selected, encs, scaler, mapped_inputs)
+                            preds, probs = predict_df(pretrained['model'], scaler, encs, row, selected)
+                            p = int(preds[0]) if preds is not None else None
+                            lab, stat = _pred_to_human(p, encs, pretrained['model'])
+                            if stat == 'Attack':
+                                st.error('Intrusion detected')
+                            else:
+                                st.success('No intrusion detected')
+                        except Exception as e:
+                            st.exception(e)
                 sim_mode = st.selectbox('Simulator mode', ['Key=Value sample', 'Random samples', 'Upload CSV for simulation'])
                 if sim_mode == 'Key=Value sample':
                     kv = st.text_input('Enter comma-separated key=value pairs (e.g. protocol_type=tcp,src_bytes=100)')
@@ -334,18 +458,13 @@ if mode == 'Detection':
                                 row = build_row_from_inputs(selected, encoders, scaler, inputs)
                                 preds, probs = predict_df(pretrained['model'], scaler, encoders, row, selected)
                                 pred = int(preds[0]) if preds is not None else None
-                                probs_list = probs[0].tolist() if probs is not None else None
-                                if 'class' in encoders and pred is not None:
-                                    try:
-                                        human_label = encoders['class'].classes_[pred]
-                                    except Exception:
-                                        human_label = str(pred)
-                                else:
-                                    human_label = str(pred)
+                                lab, stat = _pred_to_human(pred, pretrained.get('encoders', {}), pretrained['model'])
                                 st.write('Model-ready input:')
                                 st.write(row)
-                                st.metric('Prediction', human_label)
-                                st.write('Probabilities', probs_list)
+                                if stat == 'Attack':
+                                    st.error('Intrusion detected')
+                                else:
+                                    st.success('No intrusion detected')
                         except Exception as e:
                             st.exception(e)
                 elif sim_mode == 'Random samples':
@@ -360,7 +479,9 @@ if mode == 'Detection':
                                 inp = random_sample(selected, encoders, scaler)
                                 row = build_row_from_inputs(selected, encoders, scaler, inp)
                                 preds, probs = predict_df(pretrained['model'], scaler, encoders, row, selected)
-                                rows.append({**inp, 'prediction': (int(preds[0]) if preds is not None else None), 'probs': (probs[0].tolist() if probs is not None else None)})
+                                p = int(preds[0]) if preds is not None else None
+                                lab, stat = _pred_to_human(p, encoders, pretrained['model'])
+                                rows.append({**inp, 'label': lab, 'status': stat})
                             st.write(pd.DataFrame(rows))
                         except Exception as e:
                             st.exception(e)
