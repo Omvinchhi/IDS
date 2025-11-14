@@ -4,6 +4,7 @@ import numpy as np
 import io
 import pickle
 import os
+import random
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
@@ -107,6 +108,102 @@ def train_and_evaluate(model, X_train, X_test, y_train, y_test):
         'report': classification_report(y_test, y_pred_test, output_dict=False),
         'confusion': confusion_matrix(y_test, y_pred_test)
     }
+
+
+##### Simulator helper functions (merged from simulate_input.py) #####
+def parse_kv_list(s: str):
+    out = {}
+    for part in s.split(','):
+        if '=' not in part:
+            continue
+        k, v = part.split('=', 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def build_row_from_inputs(selected, encoders, scaler, inputs: dict):
+    vals = []
+    for i, col in enumerate(selected):
+        if col in inputs and inputs[col] is not None:
+            raw = inputs[col]
+            if col in encoders:
+                le = encoders[col]
+                mapping = {str(v): idx for idx, v in enumerate(list(le.classes_))}
+                mapped = mapping.get(str(raw), -1)
+                vals.append(int(mapped))
+            else:
+                try:
+                    vals.append(float(raw))
+                except Exception:
+                    if scaler is not None:
+                        vals.append(float(scaler.mean_[i]))
+                    else:
+                        vals.append(0.0)
+        else:
+            if col in encoders:
+                le = encoders[col]
+                default = le.classes_[0] if len(le.classes_) > 0 else -1
+                mapping = {str(v): idx for idx, v in enumerate(list(le.classes_))}
+                vals.append(int(mapping.get(str(default), -1)))
+            else:
+                if scaler is not None:
+                    vals.append(float(scaler.mean_[i]))
+                else:
+                    vals.append(0.0)
+
+    return pd.DataFrame([vals], columns=selected)
+
+
+def random_sample(selected, encoders, scaler):
+    inputs = {}
+    for i, col in enumerate(selected):
+        if col in encoders:
+            le = encoders[col]
+            if len(le.classes_) > 0:
+                inputs[col] = random.choice(list(le.classes_))
+            else:
+                inputs[col] = ''
+        else:
+            if scaler is not None:
+                mean = float(scaler.mean_[i])
+                scale = float(getattr(scaler, 'scale_', np.ones_like(scaler.mean_))[i])
+                inputs[col] = max(0.0, random.gauss(mean, max(1.0, scale)))
+            else:
+                inputs[col] = float(random.uniform(0, 100))
+    return inputs
+
+
+def predict_df(model, scaler, encoders, df, selected):
+    X = df.reindex(columns=selected, fill_value=0)
+    for c in selected:
+        if c in encoders and c in X.columns:
+            le = encoders[c]
+            mapping = {str(v): i for i, v in enumerate(list(le.classes_))}
+            X[c] = X[c].astype(str).map(lambda v: mapping.get(v, -1)).astype(int)
+        else:
+            try:
+                X[c] = pd.to_numeric(X[c])
+            except Exception:
+                X[c] = 0
+
+    if scaler is not None:
+        Xs = scaler.transform(X)
+    else:
+        Xs = X.values
+
+    try:
+        probs = model.predict_proba(Xs)
+    except Exception:
+        probs = None
+
+    try:
+        preds = model.predict(Xs)
+    except Exception:
+        preds = None
+
+    return preds, probs
+
+##### end simulator helpers #####
 with st.sidebar:
     st.header('Mode')
     mode = st.radio('Select mode', ['Detection', 'Train (Advanced)'])
@@ -219,6 +316,70 @@ if mode == 'Detection':
                             st.metric('Prediction', str(pred))
                 except Exception as e:
                     st.exception(e)
+            # Simulator: generate or craft model-compatible inputs and classify
+            with st.expander('Simulator (generate model-compatible inputs)'):
+                st.write('Create synthetic or custom samples using the model\'s encoders and selected features.')
+                sim_mode = st.selectbox('Simulator mode', ['Key=Value sample', 'Random samples', 'Upload CSV for simulation'])
+                if sim_mode == 'Key=Value sample':
+                    kv = st.text_input('Enter comma-separated key=value pairs (e.g. protocol_type=tcp,src_bytes=100)')
+                    if st.button('Classify KV sample'):
+                        try:
+                            if not kv:
+                                st.error('Provide key=value pairs')
+                            else:
+                                inputs = parse_kv_list(kv)
+                                selected = pretrained.get('selected', [])
+                                scaler = pretrained.get('scaler', None)
+                                encoders = pretrained.get('encoders', {}) or {}
+                                row = build_row_from_inputs(selected, encoders, scaler, inputs)
+                                preds, probs = predict_df(pretrained['model'], scaler, encoders, row, selected)
+                                pred = int(preds[0]) if preds is not None else None
+                                probs_list = probs[0].tolist() if probs is not None else None
+                                if 'class' in encoders and pred is not None:
+                                    try:
+                                        human_label = encoders['class'].classes_[pred]
+                                    except Exception:
+                                        human_label = str(pred)
+                                else:
+                                    human_label = str(pred)
+                                st.write('Model-ready input:')
+                                st.write(row)
+                                st.metric('Prediction', human_label)
+                                st.write('Probabilities', probs_list)
+                        except Exception as e:
+                            st.exception(e)
+                elif sim_mode == 'Random samples':
+                    n = st.number_input('Number of random samples', min_value=1, max_value=100, value=3)
+                    if st.button('Generate random samples'):
+                        try:
+                            selected = pretrained.get('selected', [])
+                            scaler = pretrained.get('scaler', None)
+                            encoders = pretrained.get('encoders', {}) or {}
+                            rows = []
+                            for _ in range(int(n)):
+                                inp = random_sample(selected, encoders, scaler)
+                                row = build_row_from_inputs(selected, encoders, scaler, inp)
+                                preds, probs = predict_df(pretrained['model'], scaler, encoders, row, selected)
+                                rows.append({**inp, 'prediction': (int(preds[0]) if preds is not None else None), 'probs': (probs[0].tolist() if probs is not None else None)})
+                            st.write(pd.DataFrame(rows))
+                        except Exception as e:
+                            st.exception(e)
+                else:
+                    up = st.file_uploader('Upload CSV to simulate (columns may include selected features)', type='csv')
+                    if up is not None:
+                        try:
+                            df = pd.read_csv(up)
+                            preds, probs = predict_df(pretrained['model'], pretrained.get('scaler', None), pretrained.get('encoders', {}), df, pretrained.get('selected', []))
+                            out_df = df.copy()
+                            if preds is not None:
+                                out_df['prediction'] = preds
+                            if probs is not None:
+                                for i in range(probs.shape[1]):
+                                    out_df[f'prob_{i}'] = probs[:, i]
+                            st.write(out_df.head())
+                            st.download_button('Download simulation results', data=out_df.to_csv(index=False).encode('utf-8'), file_name='simulation_results.csv')
+                        except Exception as e:
+                            st.exception(e)
 elif mode == 'Train (Advanced)':
     st.header('Train model (advanced)')
     if st.button('Load & Preprocess (advanced)'):
@@ -277,4 +438,3 @@ elif mode == 'Train (Advanced)':
             st.success(f'Model trained and saved to {MODEL_PATH}')
         except Exception as e:
             st.exception(e)
-
