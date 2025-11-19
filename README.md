@@ -24,7 +24,7 @@ python -m pip install -r requirements.txt
 3. Run Streamlit:
 
 ```powershell
-streamlit run app.py
+streamlit run simulation_app.py
 ```
 
 The app expects `Train_data.csv` and `Test_data.csv` in the repository root by default. You can instead upload your own CSVs via the sidebar.
@@ -38,3 +38,4 @@ Notes and limitations:
 
 - The app runs feature selection (RFE) using a small RandomForest; for large datasets this will be slower.
 - The app trains models in-process — for production use, pretrain and serve a model or use background jobs.
+
